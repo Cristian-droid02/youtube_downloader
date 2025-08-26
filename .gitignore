@@ -3,3 +3,6 @@ downloads/
 *.pyc
 *.pyo
 .env
+*.mp4
+*.mp3
+*.webm
