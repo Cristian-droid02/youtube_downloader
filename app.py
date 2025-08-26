@@ -47,18 +47,13 @@ def download():
     if format_id == "mp3":
         ydl_opts = {
             "format": "bestaudio/best",
-            "outtmpl": os.path.join(DOWNLOAD_FOLDER, "%(title)s.%(ext)s"),
-            "progress_hooks": [progress_hook],
-            "postprocessors": [
-                {
-                    "key": "FFmpegExtractAudio",
-                    "preferredcodec": "mp3",
-                    "preferredquality": "320"
-                },
-                {"key": "FFmpegMetadata"},
-                {"key": "EmbedThumbnail"}  
-            ],
-            "writethumbnail": True,
+            "outtmpl": filepath,
+            "postprocessors": [{
+                "key": "FFmpegExtractAudio",
+                "preferredcodec": "mp3",
+                "preferredquality": "320",
+            }],
+            "cookiefile": "cookies.txt",  # <--- Usar cookies exportadas
         }
     else:
         ydl_opts = {
