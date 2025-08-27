@@ -5,14 +5,7 @@ import os
 app = Flask(__name__)
 
 DOWNLOAD_FOLDER = "downloads"
-COOKIES_FILE = "cookies.txt"  # Nombre del archivo de cookies
 os.makedirs(DOWNLOAD_FOLDER, exist_ok=True)
-
-# Verificar si el archivo de cookies existe
-if os.path.exists(COOKIES_FILE):
-    print("✓ Cookies encontradas. Se usará autenticación.")
-else:
-    print("⚠️ No se encontró archivo de cookies. Continuando sin autenticación.")
 
 progress_data = {"status": "idle", "progress": 0, "filename": None}
 
@@ -27,49 +20,20 @@ def progress_hook(d):
         progress_data["progress"] = 100
         progress_data["filename"] = d["filename"]
 
-def get_ydl_opts_base():
-    """Obtener opciones base que incluyen cookies si están disponibles"""
-    base_opts = {"quiet": True}
-    
-    # Agregar cookies si el archivo existe
-    if os.path.exists(COOKIES_FILE):
-        base_opts["cookiefile"] = COOKIES_FILE
-        # También agregar estas opciones para evitar bloqueos
-        base_opts["extractor_args"] = {
-            "youtube": {
-                "skip": ["dash", "hls"],
-                "player_client": ["android", "web"]
-            }
-        }
-        base_opts["http_headers"] = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "en-us,en;q=0.5",
-            "Accept-Encoding": "gzip,deflate",
-            "Accept-Charset": "ISO-8859-1,utf-8;q=0.7,*;q=0.7",
-            "Connection": "keep-alive"
-        }
-    
-    return base_opts
-
 @app.route("/", methods=["GET", "POST"])
 def index():
     if request.method == "POST":
         url = request.form.get("url")
         if url:
-            ydl_opts = get_ydl_opts_base()
-            try:
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    info = ydl.extract_info(url, download=False)
-                    formats = [
-                        {"format_id": f["format_id"], "ext": f["ext"], "resolution": f.get("resolution") or "audio"}
-                        for f in info["formats"]
-                        if f["ext"] in ["mp4", "m4a"]
-                    ]
-                return render_template_string(quality_template, url=url, formats=formats)
-            except Exception as e:
-                error_message = f"Error: {str(e)}"
-                return render_template_string(error_template, error=error_message)
+            ydl_opts = {"quiet": True}
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+                formats = [
+                    {"format_id": f["format_id"], "ext": f["ext"], "resolution": f.get("resolution") or "audio"}
+                    for f in info["formats"]
+                    if f["ext"] in ["mp4", "m4a"]
+                ]
+            return render_template_string(quality_template, url=url, formats=formats)
 
     return render_template_string(index_template)
 
@@ -80,70 +44,37 @@ def download():
 
     progress_data.update({"status": "starting", "progress": 0, "filename": None})
 
-    # Obtener opciones base con cookies
-    ydl_opts = get_ydl_opts_base()
-    ydl_opts["outtmpl"] = os.path.join(DOWNLOAD_FOLDER, "%(title)s.%(ext)s")
-    ydl_opts["progress_hooks"] = [progress_hook]
-
     if format_id == "mp3":
-        ydl_opts.update({
-            "format": "bestaudio/best",
-            "postprocessors": [
-                {
-                    "key": "FFmpegExtractAudio",
-                    "preferredcodec": "mp3",
-                    "preferredquality": "320"
-                },
-                {"key": "FFmpegMetadata"},
-                {"key": "EmbedThumbnail"}  
-            ],
-            "writethumbnail": True,
-        })
+        ydl_opts = {
+    "format": "bestaudio/best",
+    "postprocessors": [{
+        "key": "FFmpegExtractAudio",
+        "preferredcodec": "mp3",
+        "preferredquality": "320",
+    }],
+    "cookiefile": "cookies.txt"  # <--- aquí
+}
+
     else:
-        ydl_opts.update({
+        ydl_opts = {
             "format": format_id,
-            "merge_output_format": "mp4"
-        })
+            "outtmpl": os.path.join(DOWNLOAD_FOLDER, "%(title)s.%(ext)s"),
+            "merge_output_format": "mp4",
+            "progress_hooks": [progress_hook]
+        }
 
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            filename = ydl.prepare_filename(info)
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(url, download=True)
+        filename = ydl.prepare_filename(info)
 
-            if format_id == "mp3":
-                filename = os.path.splitext(filename)[0] + ".mp3"
+        if format_id == "mp3":
+            filename = os.path.splitext(filename)[0] + ".mp3"
 
-        return send_file(filename, as_attachment=True)
-    
-    except Exception as e:
-        error_message = f"Error al descargar: {str(e)}"
-        return render_template_string(error_template, error=error_message)
+    return send_file(filename, as_attachment=True)
 
 @app.route("/progress")
 def progress():
     return jsonify(progress_data)
-
-# Template de error
-error_template = """
-<!DOCTYPE html>
-<html>
-<head>
-  <title>Error</title>
-  <script src="https://cdn.tailwindcss.com"></script>
-</head>
-<body class="bg-gray-900 text-white flex items-center justify-center min-h-screen">
-  <div class="bg-gray-800 p-8 rounded-2xl shadow-xl w-full max-w-lg text-center">
-    <h2 class="text-2xl font-bold mb-4 text-red-500">Error</h2>
-    <p class="mb-4">{{ error }}</p>
-    <a href="/" class="bg-blue-500 hover:bg-blue-600 px-4 py-2 rounded-lg shadow-md">
-      Volver al inicio
-    </a>
-  </div>
-</body>
-</html>
-"""
-
-# Los templates index_template y quality_template permanecen igual como en tu código original
 
 index_template = """
 <!DOCTYPE html>
@@ -163,10 +94,6 @@ index_template = """
         Continuar
       </button>
     </form>
-    {% if cookies_available %}
-    <p class="mt-4 text-green-400">✓ Autenticación con cookies disponible</p>
-    {% else %}
-    {% endif %}
   </div>
 </body>
 </html>
@@ -206,7 +133,7 @@ quality_template = """
             {{ f.resolution }} ({{ f.ext }})
           </option>
         {% endfor %}
-        <option value="mp3">Solo Audio (MP3 320kbps)</option>
+        <option value="mp3">🎵 Solo Audio (MP3 320kbps)</option>
       </select>
       <br><br>
       <button type="submit" class="bg-green-500 hover:bg-green-600 px-4 py-2 rounded-lg shadow-md">
