@@ -6,7 +6,36 @@ import tempfile
 
 app = Flask(__name__)
 
+# Usar directorio temporal para descargas
 DOWNLOAD_FOLDER = tempfile.mkdtemp()
+
+# Configuración de cookies
+COOKIES_FILE = "cookies.txt"
+BROWSER_COOKIES = "chrome"
+
+# Configurar cookies automáticamente
+def setup_cookies():
+    cookies_config = {}
+    
+    # 1. Primero verificar archivo de cookies tradicional
+    if os.path.exists(COOKIES_FILE):
+        cookies_config["cookiefile"] = COOKIES_FILE
+        return cookies_config
+    
+    # 2. Si no hay archivo, intentar usar cookies del navegador
+    try:
+        # Testear si podemos acceder a cookies del navegador
+        test_opts = {"cookiesfrombrowser": (BROWSER_COOKIES,)}
+        with yt_dlp.YoutubeDL(test_opts) as ydl:
+            pass
+        cookies_config["cookiesfrombrowser"] = (BROWSER_COOKIES,)
+        return cookies_config
+    except:
+        return {}
+
+# Configuración global de cookies
+COOKIES_CONFIG = setup_cookies()
+
 progress_data = {"status": "idle", "progress": 0, "filename": None}
 
 def progress_hook(d):
@@ -21,26 +50,43 @@ def progress_hook(d):
         progress_data["filename"] = d["filename"]
 
 def get_ydl_opts_base():
-    return {
+    """Obtener opciones base que incluyen cookies configuradas correctamente"""
+    base_opts = {
         "quiet": True,
         "no_warnings": False,
         "socket_timeout": 30,
         "extract_flat": False,
     }
+    
+    # Añadir configuración de cookies si está disponible
+    if COOKIES_CONFIG:
+        base_opts.update(COOKIES_CONFIG)
+    
+    return base_opts
 
 def get_available_video_formats(info):
+    """Obtener solo formatos de video con audio"""
     video_formats = []
+    
     for f in info.get("formats", []):
         try:
+            # Solo considerar formatos con video Y audio
             if f.get('vcodec') == 'none' or f.get('acodec') == 'none':
                 continue
+                
+            # Obtener la resolución
             height = f.get('height')
             if not height:
                 continue
+            
+            # Calcular tamaño aproximado
             filesize = f.get('filesize', 0) or f.get('filesize_approx', 0)
             filesize_mb = f"{filesize / (1024*1024):.1f} MB" if filesize else "N/A"
+            
+            # Obtener FPS si está disponible
             fps = f.get('fps', 0)
             fps_text = f" {fps}fps" if fps > 30 else ""
+            
             video_formats.append({
                 "format_id": f["format_id"],
                 "resolution": f"{height}p{fps_text}",
@@ -49,29 +95,43 @@ def get_available_video_formats(info):
                 "ext": f.get("ext", "mp4"),
                 "quality": f.get('quality', 0),
             })
+                    
         except (KeyError, TypeError):
             continue
+    
+    # Ordenar por resolución (mayor primero)
     video_formats.sort(key=lambda x: x["height"], reverse=True)
+    
     return video_formats
 
 @app.route("/", methods=["GET", "POST"])
 def index():
     if request.method == "POST":
         url = request.form.get("url")
-        if url and re.match(r'^(https?://)?(www\.)?(youtube\.com|youtu\.be)/', url):
+        if url:
+            # Validar URL de YouTube
+            if not re.match(r'^(https?://)?(www\.)?(youtube\.com|youtu\.be)/', url):
+                return render_template_string(error_template, error="URL de YouTube no válida")
+            
             ydl_opts = get_ydl_opts_base()
             try:
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                     info = ydl.extract_info(url, download=False)
+                    
+                    # Obtener formatos de video disponibles (con audio)
                     video_formats = get_available_video_formats(info)
+                    
                     if not video_formats:
                         return render_template_string(error_template, error="No se encontraron formatos disponibles para este video")
+                    
+                    # Información del video para mostrar
                     video_info = {
                         "title": info.get('title', 'Video sin título'),
                         "duration": info.get('duration', 0),
                         "thumbnail": info.get('thumbnail', ''),
                         "view_count": info.get('view_count', 0)
                     }
+                    
                 return render_template_string(
                     quality_template, 
                     url=url, 
@@ -79,26 +139,58 @@ def index():
                     video_info=video_info
                 )
             except Exception as e:
-                return render_template_string(
-                    error_template, 
-                    error=f"Error al obtener información: {str(e)}<br>Este video podría requerir autenticación. Prueba con otro."
-                )
-        else:
-            return render_template_string(error_template, error="URL de YouTube no válida")
+                error_message = f"Error al obtener información: {str(e)}"
+                # Intentar sin cookies si falla con cookies
+                if COOKIES_CONFIG:
+                    try:
+                        ydl_opts_no_cookies = {
+                            "quiet": True,
+                            "no_warnings": False,
+                        }
+                        with yt_dlp.YoutubeDL(ydl_opts_no_cookies) as ydl:
+                            info = ydl.extract_info(url, download=False)
+                            video_formats = get_available_video_formats(info)
+                            
+                            if video_formats:
+                                video_info = {
+                                    "title": info.get('title', 'Video sin título'),
+                                    "duration": info.get('duration', 0),
+                                    "thumbnail": info.get('thumbnail', ''),
+                                    "view_count": info.get('view_count', 0)
+                                }
+                                return render_template_string(
+                                    quality_template, 
+                                    url=url, 
+                                    video_formats=video_formats,
+                                    video_info=video_info
+                                )
+                    except:
+                        pass
+                
+                return render_template_string(error_template, error=error_message)
+
     return render_template_string(index_template)
 
 @app.route("/download", methods=["POST"])
 def download():
     url = request.form.get("url")
     format_id = request.form.get("format_id")
-    convert_mp3 = request.form.get("convert_mp3")
+
     if not url:
         return render_template_string(error_template, error="URL no proporcionada")
+
     progress_data.update({"status": "starting", "progress": 0, "filename": None})
+
+    # Obtener opciones base con cookies
     ydl_opts = get_ydl_opts_base()
+    
+    # Usar directorio temporal para evitar problemas de permisos
     ydl_opts["outtmpl"] = os.path.join(DOWNLOAD_FOLDER, "%(title)s.%(ext)s")
     ydl_opts["progress_hooks"] = [progress_hook]
-    if convert_mp3 == "on":
+
+    # Configurar formato seleccionado
+    if format_id == "mp3":
+        # Para audio, convertir a MP3 de alta calidad (320kbps)
         ydl_opts["format"] = "bestaudio/best"
         ydl_opts["postprocessors"] = [{
             "key": "FFmpegExtractAudio",
@@ -106,39 +198,87 @@ def download():
             "preferredquality": "320"
         }]
     else:
+        # Para video, usar el formato seleccionado
         ydl_opts["format"] = format_id
         ydl_opts["merge_output_format"] = "mp4"
+
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
             filename = ydl.prepare_filename(info)
-            if convert_mp3 == "on":
+
+            # Asegurar extensión correcta
+            if format_id == "mp3":
                 filename = os.path.splitext(filename)[0] + ".mp3"
             elif not filename.endswith('.mp4'):
                 filename = os.path.splitext(filename)[0] + ".mp4"
+
+            # Verificar que el archivo existe antes de enviarlo
             if not os.path.exists(filename):
+                # Buscar el archivo en el directorio de descargas
                 download_dir = os.path.dirname(filename)
                 actual_files = [f for f in os.listdir(download_dir) if os.path.isfile(os.path.join(download_dir, f))]
+                
                 if actual_files:
+                    # Usar el primer archivo encontrado
                     filename = os.path.join(download_dir, actual_files[0])
                 else:
                     raise FileNotFoundError(f"No se encontró ningún archivo descargado en {download_dir}")
+
+        # Enviar el archivo como descarga
         response = send_file(
             filename, 
             as_attachment=True,
             download_name=os.path.basename(filename)
         )
+        
         return response
+    
     except Exception as e:
-        return render_template_string(
-            error_template, 
-            error=f"Error al descargar: {str(e)}<br>Este video podría requerir autenticación."
-        )
+        error_message = f"Error al descargar: {str(e)}"
+        # Intentar sin cookies si falla con cookies
+        if COOKIES_CONFIG and "cookies" in str(e).lower():
+            try:
+                ydl_opts_no_cookies = get_ydl_opts_base().copy()
+                if "cookiefile" in ydl_opts_no_cookies:
+                    del ydl_opts_no_cookies["cookiefile"]
+                if "cookiesfrombrowser" in ydl_opts_no_cookies:
+                    del ydl_opts_no_cookies["cookiesfrombrowser"]
+                
+                ydl_opts_no_cookies["outtmpl"] = os.path.join(DOWNLOAD_FOLDER, "%(title)s.%(ext)s")
+                ydl_opts_no_cookies["progress_hooks"] = [progress_hook]
+                
+                if format_id == "mp3":
+                    ydl_opts_no_cookies["format"] = "bestaudio/best"
+                    ydl_opts_no_cookies["postprocessors"] = [{
+                        "key": "FFmpegExtractAudio",
+                        "preferredcodec": "mp3",
+                        "preferredquality": "320"
+                    }]
+                else:
+                    ydl_opts_no_cookies["format"] = format_id
+                    ydl_opts_no_cookies["merge_output_format"] = "mp4"
+                
+                with yt_dlp.YoutubeDL(ydl_opts_no_cookies) as ydl:
+                    info = ydl.extract_info(url, download=True)
+                    filename = ydl.prepare_filename(info)
+                    
+                    if format_id == "mp3":
+                        filename = os.path.splitext(filename)[0] + ".mp3"
+                    elif not filename.endswith('.mp4'):
+                        filename = os.path.splitext(filename)[0] + ".mp4"
+                
+                return send_file(filename, as_attachment=True, download_name=os.path.basename(filename))
+            except:
+                pass
+                
+        return render_template_string(error_template, error=error_message)
 
 @app.route("/progress")
 def progress():
     return jsonify(progress_data)
 
+# Templates sin mensajes de cookies
 error_template = """
 <!DOCTYPE html>
 <html lang="es">
@@ -159,12 +299,12 @@ error_template = """
     <div class="bg-gray-800 p-6 rounded-xl shadow-xl w-full max-w-md border border-gray-700">
       <div class="text-center">
         <div class="mx-auto w-16 h-16 flex items-center justify-center bg-gray-700 rounded-full mb-4">
-          <svg class="w-8 h-8 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <svg class="w-8 h-8 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
           </svg>
         </div>
         <h2 class="text-xl font-semibold text-gray-200 mb-2">Error</h2>
-        <p class="text-gray-400 mb-6">{{ error|safe }}</p>
+        <p class="text-gray-400 mb-6">{{ error }}</p>
         <a href="/" class="inline-block bg-gray-700 hover:bg-gray-600 text-gray-200 px-4 py-2 rounded-lg transition-colors duration-200">
           Volver al inicio
         </a>
@@ -234,7 +374,7 @@ quality_template = """
         
         <div class="mb-6">
           <h3 class="text-lg font-medium text-gray-300 mb-3 flex items-center">
-            <svg class="w-5 h-5 mr-2 text-gray-400" fill="currentColor" viewBox="0 0 20 20">
+            <svg class="w-5 h-5 mr-2 text-gray-400" fill="currentColor" viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg">
               <path fill-rule="evenodd" d="M4 3a2 2 0 00-2 2v10a2 2 0 002 2h12a2 2 0 002-2V5a2 2 0 00-2-2H4zm12 12H4l4-8 3 6 2-4 3 6z" clip-rule="evenodd"></path>
             </svg>
             Formatos de Video
@@ -259,28 +399,36 @@ quality_template = """
         </div>
         
         <div class="mb-6">
-          <label class="flex items-center cursor-pointer">
-            <input type="checkbox" name="convert_mp3" class="h-4 w-4 text-gray-400 border-gray-500 focus:ring-gray-400">
-            <span class="ml-2 text-gray-200 font-medium">Convertir a MP3 (solo audio)</span>
-          </label>
+          <h3 class="text-lg font-medium text-gray-300 mb-3 flex items-center">
+            <svg class="w-5 h-5 mr-2 text-gray-400" fill="currentColor" viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg">
+              <path fill-rule="evenodd" d="M9.383 3.076A1 1 0 0110 4v12a1 1 0 01-1.707.707L4.586 13H2a1 1 0 01-1-1V8a1 1 0 011-1h2.586l3.707-3.707a1 1 0 011.09-.217zM14.657 2.929a1 1 0 011.414 0A9.972 9.972 0 0119 10a9.972 9.972 0 01-2.929 7.071 1 1 0 01-1.414-1.414A7.971 7.971 0 0017 10c0-2.21-.894-4.208-2.343-5.657a1 1 0 010-1.414zm-2.829 2.828a1 1 0 011.415 0A5.983 5.983 0 0115 10a5.984 5.984 0 01-1.757 4.243 1 1 0 01-1.415-1.415A3.984 3.984 0 0013 10a3.983 3.983 0 00-1.172-2.828 a1 1 0 010-1.415z" clip-rule="evenodd"></path>
+            </svg>
+            Formato de Audio
+          </h3>
+          <div class="space-y-3">
+            <label class="quality-option block bg-gray-700 p-4 rounded-lg border border-gray-600 hover:bg-gray-650 cursor-pointer">
+              <div class="flex items-center">
+                <input type="radio" name="format_id" value="mp3" 
+                       class="h-4 w-4 text-gray-400 border-gray-500 focus:ring-gray-400">
+                <div class="ml-3 flex-1">
+                  <div class="flex justify-between items-center">
+                    <span class="text-gray-200 font-medium">MP3 - Alta Calidad (320kbps)</span>
+                    <span class="text-sm text-gray-400">Tamaño variable</span>
+                  </div>
+                  <span class="text-xs text-gray-500 block mt-1">Audio extraído y convertido a MP3</span>
+                </div>
+              </div>
+            </label>
+          </div>
         </div>
         
         <button type="submit" class="w-full bg-gray-700 hover:bg-gray-600 text-gray-200 py-3 px-4 rounded-lg font-medium transition-colors duration-200 flex items-center justify-center">
-          <svg class="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <svg class="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path>
           </svg>
           Descargar
         </button>
       </form>
-      
-      <div class="mt-4 text-center">
-        <p class="text-yellow-400 text-sm flex items-center justify-center">
-          <svg class="w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"></path>
-          </svg>
-          Solo se pueden descargar videos públicos y no restringidos.
-        </p>
-      </div>
       
       <div id="progress-container" class="hidden mt-6 p-4 bg-gray-700 rounded-lg border border-gray-600">
         <p id="status" class="text-gray-300 text-center mb-2">Preparando descarga...</p>
@@ -341,7 +489,7 @@ index_template = """
     <div class="card rounded-2xl shadow-2xl p-6 md:p-8 w-full max-w-md">
       <div class="text-center mb-6">
         <div class="inline-flex items-center justify-center w-16 h-16 bg-gray-700 rounded-full mb-4">
-          <svg class="w-8 h-8 text-gray-300" fill="currentColor" viewBox="0 0 24 24">
+          <svg class="w-8 h-8 text-gray-300" fill="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
             <path d="M19.615 3.184c-3.604-.246-11.631-.245-15.23 0-3.897.266-4.356 2.62-4.385 8.816.029 6.185.484 8.549 4.385 8.816 3.6.245 11.626.246 15.23 0 3.897-.266 4.356-2.62 4.385-8.816-.029-6.185-.484-8.549-4.385-8.816zm-10.615 12.816v-8l8 3.993-8 4.007z"/>
           </svg>
         </div>
@@ -358,23 +506,12 @@ index_template = """
         </div>
         
         <button type="submit" class="w-full bg-gray-700 hover:bg-gray-600 text-gray-200 py-3 px-4 rounded-lg font-medium transition-colors duration-200 flex items-center justify-center">
-          <svg class="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <svg class="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
           </svg>
           Ver formatos disponibles
         </button>
       </form>
-      
-      <div class="mt-6 pt-6 border-t border-gray-700">
-        <div class="text-center">
-          <p class="text-yellow-400 text-sm flex items-center justify-center">
-            <svg class="w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"></path>
-            </svg>
-            Solo se pueden descargar videos públicos y no restringidos.
-          </p>
-        </div>
-      </div>
     </div>
   </div>
 </body>
