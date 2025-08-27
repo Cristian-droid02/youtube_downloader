@@ -10,6 +10,12 @@ app = Flask(__name__)
 DOWNLOAD_FOLDER = tempfile.mkdtemp()
 print(f"📁 Directorio de descargas: {DOWNLOAD_FOLDER}")
 
+COOKIES_FILE = "cookies.txt"
+if os.path.exists(COOKIES_FILE):
+    print("✓ Cookies encontradas. Se usará autenticación.")
+else:
+    print("⚠️ No se encontró archivo de cookies. Continuando sin autenticación.")
+
 progress_data = {"status": "idle", "progress": 0, "filename": None}
 
 def progress_hook(d):
