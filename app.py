@@ -10,12 +10,6 @@ app = Flask(__name__)
 DOWNLOAD_FOLDER = tempfile.mkdtemp()
 print(f"📁 Directorio de descargas: {DOWNLOAD_FOLDER}")
 
-COOKIES_FILE = "cookies.txt"
-if os.path.exists(COOKIES_FILE):
-    print("✓ Cookies encontradas. Se usará autenticación.")
-else:
-    print("⚠️ No se encontró archivo de cookies. Continuando sin autenticación.")
-
 progress_data = {"status": "idle", "progress": 0, "filename": None}
 
 def progress_hook(d):
@@ -30,40 +24,28 @@ def progress_hook(d):
         progress_data["filename"] = d["filename"]
 
 def get_ydl_opts_base():
-    """Obtener opciones base que incluyen cookies si están disponibles"""
+    """Opciones base SIN cookies"""
     base_opts = {
         "quiet": True,
         "no_warnings": False,
     }
-    
-    if os.path.exists(COOKIES_FILE):
-        base_opts["cookiefile"] = COOKIES_FILE
-    
+    # No se agrega cookiefile
     return base_opts
 
 def get_available_video_formats(info):
     """Obtener solo formatos de video con audio"""
     video_formats = []
-    
     for f in info.get("formats", []):
         try:
-            # Solo considerar formatos con video Y audio
             if f.get('vcodec') == 'none' or f.get('acodec') == 'none':
                 continue
-                
-            # Obtener la resolución
             height = f.get('height')
             if not height:
                 continue
-            
-            # Calcular tamaño aproximado
             filesize = f.get('filesize', 0) or f.get('filesize_approx', 0)
             filesize_mb = f"{filesize / (1024*1024):.1f} MB" if filesize else "N/A"
-            
-            # Obtener FPS si está disponible
             fps = f.get('fps', 0)
             fps_text = f" {fps}fps" if fps > 30 else ""
-            
             video_formats.append({
                 "format_id": f["format_id"],
                 "resolution": f"{height}p{fps_text}",
@@ -72,13 +54,9 @@ def get_available_video_formats(info):
                 "ext": f.get("ext", "mp4"),
                 "quality": f.get('quality', 0),
             })
-                    
         except (KeyError, TypeError):
             continue
-    
-    # Ordenar por resolución (mayor primero)
     video_formats.sort(key=lambda x: x["height"], reverse=True)
-    
     return video_formats
 
 @app.route("/", methods=["GET", "POST"])
@@ -86,29 +64,21 @@ def index():
     if request.method == "POST":
         url = request.form.get("url")
         if url:
-            # Validar URL de YouTube
             if not re.match(r'^(https?://)?(www\.)?(youtube\.com|youtu\.be)/', url):
                 return render_template_string(error_template, error="URL de YouTube no válida")
-            
             ydl_opts = get_ydl_opts_base()
             try:
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                     info = ydl.extract_info(url, download=False)
-                    
-                    # Obtener formatos de video disponibles (con audio)
                     video_formats = get_available_video_formats(info)
-                    
                     if not video_formats:
                         return render_template_string(error_template, error="No se encontraron formatos disponibles para este video")
-                    
-                    # Información del video para mostrar
                     video_info = {
                         "title": info.get('title', 'Video sin título'),
                         "duration": info.get('duration', 0),
                         "thumbnail": info.get('thumbnail', ''),
                         "view_count": info.get('view_count', 0)
                     }
-                    
                 return render_template_string(
                     quality_template, 
                     url=url, 
@@ -118,29 +88,20 @@ def index():
             except Exception as e:
                 error_message = f"Error al obtener información: {str(e)}"
                 return render_template_string(error_template, error=error_message)
-
-    return render_template_string(index_template)
+    # No se muestra info de cookies en la interfaz
+    return render_template_string(index_template, cookies_available=False)
 
 @app.route("/download", methods=["POST"])
 def download():
     url = request.form.get("url")
     format_id = request.form.get("format_id")
-
     if not url:
         return render_template_string(error_template, error="URL no proporcionada")
-
     progress_data.update({"status": "starting", "progress": 0, "filename": None})
-
-    # Obtener opciones base con cookies
     ydl_opts = get_ydl_opts_base()
-    
-    # Usar directorio temporal para evitar problemas de permisos
     ydl_opts["outtmpl"] = os.path.join(DOWNLOAD_FOLDER, "%(title)s.%(ext)s")
     ydl_opts["progress_hooks"] = [progress_hook]
-
-    # Configurar formato seleccionado
     if format_id == "mp3":
-        # Para audio, convertir a MP3 de alta calidad (320kbps)
         ydl_opts["format"] = "bestaudio/best"
         ydl_opts["postprocessors"] = [{
             "key": "FFmpegExtractAudio",
@@ -148,42 +109,29 @@ def download():
             "preferredquality": "320"
         }]
     else:
-        # Para video, usar el formato seleccionado
         ydl_opts["format"] = format_id
         ydl_opts["merge_output_format"] = "mp4"
-
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
             filename = ydl.prepare_filename(info)
-
-            # Asegurar extensión correcta
             if format_id == "mp3":
                 filename = os.path.splitext(filename)[0] + ".mp3"
             elif not filename.endswith('.mp4'):
                 filename = os.path.splitext(filename)[0] + ".mp4"
-
-            # Verificar que el archivo existe antes de enviarlo
             if not os.path.exists(filename):
-                # Buscar el archivo en el directorio de descargas
                 download_dir = os.path.dirname(filename)
                 actual_files = [f for f in os.listdir(download_dir) if os.path.isfile(os.path.join(download_dir, f))]
-                
                 if actual_files:
-                    # Usar el primer archivo encontrado
                     filename = os.path.join(download_dir, actual_files[0])
                 else:
                     raise FileNotFoundError(f"No se encontró ningún archivo descargado en {download_dir}")
-
-        # Enviar el archivo como descarga
         response = send_file(
             filename, 
             as_attachment=True,
             download_name=os.path.basename(filename)
         )
-        
         return response
-    
     except Exception as e:
         error_message = f"Error al descargar: {str(e)}"
         return render_template_string(error_template, error=error_message)
@@ -192,7 +140,7 @@ def download():
 def progress():
     return jsonify(progress_data)
 
-# Templates actualizados
+# Templates actualizados (igual que antes)
 error_template = """
 <!DOCTYPE html>
 <html lang="es">
@@ -314,8 +262,8 @@ quality_template = """
         
         <div class="mb-6">
           <h3 class="text-lg font-medium text-gray-300 mb-3 flex items-center">
-            <svg class="w-5 h-5 mr-2 text-gray-400" fill="currentColor" viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg">
-              <path fill-rule="evenodd" d="M9.383 3.076A1 1 0 0110 4v12a1 1 0 01-1.707.707L4.586 13H2a1 1 0 01-1-1V8a1 1 0 011-1h2.586l3.707-3.707a1 1 0 011.09-.217zM14.657 2.929a1 1 0 011.414 0A9.972 9.972 0 0119 10a9.972 9.972 0 01-2.929 7.071 1 1 0 01-1.414-1.414A7.971 7.971 0 0017 10c0-2.21-.894-4.208-2.343-5.657a1 1 0 010-1.414zm-2.829 2.828a1 1 0 011.415 0A5.983 5.983 0 0115 10a5.984 5.984 0 01-1.757 4.243 1 1 0 01-1.415-1.415A3.984 3.984 0 0013 10a3.983 3.983 0 00-1.172-2.828 1 1 0 010-1.415z" clip-rule="evenodd"></path>
+            <svg class="w-5 h-5 mr-2 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg">
+              <path fill-rule="evenodd" d="M9.383 3.076A1 1 0 0110 4v12a1 1 0 01-1.707.707L4.586 13H2a1 1 0 01-1-1V8a1 1 0 011-1h2.586l3.707-3.707a1 1 0 011.09-.217zM14.657 2.929a1 1 0 011.414 0A9.972[...]
             </svg>
             Formato de Audio
           </h3>
@@ -404,7 +352,7 @@ index_template = """
       <div class="text-center mb-6">
         <div class="inline-flex items-center justify-center w-16 h-16 bg-gray-700 rounded-full mb-4">
           <svg class="w-8 h-8 text-gray-300" fill="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-            <path d="M19.615 3.184c-3.604-.246-11.631-.245-15.23 0-3.897.266-4.356 2.62-4.385 8.816.029 6.185.484 8.549 4.385 8.816 3.6.245 11.626.246 15.23 0 3.897-.266 4.356-2.62 4.385-8.816-.029-6.185-.484-8.549-4.385-8.816zm-10.615 12.816v-8l8 3.993-8 4.007z"/>
+            <path d="M19.615 3.184c-3.604-.246-11.631-.245-15.23 0-3.897.266-4.356 2.62-4.385 8.816.029 6.185.484 8.549 4.385 8.816 3.6.245 11.626.246 15.23 0 3.897-.266 4.356-2.62 4.385-8.816-.029-6.[...]
           </svg>
         </div>
         <h1 class="text-2xl md:text-3xl font-bold text-gray-100 mb-2">YouTube Downloader</h1>
@@ -415,7 +363,7 @@ index_template = """
         <div class="mb-4">
           <label for="url" class="block text-sm font-medium text-gray-300 mb-2">URL de YouTube</label>
           <input type="url" name="url" placeholder="https://www.youtube.com/watch?v=..." 
-                 class="w-full px-4 py-3 bg-gray-700 border border-gray-600 rounded-lg text-gray-100 placeholder-gray-400 focus:outline-none focus:border-gray-500 focus:ring-1 focus:ring-gray-500 transition-colors duration-200"
+                 class="w-full px-4 py-3 bg-gray-700 border border-gray-600 rounded-lg text-gray-100 placeholder-gray-400 focus:outline-none focus:border-gray-500 focus:ring-1 focus:ring-gray-500 tran[...]
                  required>
         </div>
         
@@ -426,26 +374,6 @@ index_template = """
           Ver formatos disponibles
         </button>
       </form>
-      
-      <div class="mt-6 pt-6 border-t border-gray-700">
-        <div class="text-center">
-          {% if cookies_available %}
-          <p class="text-green-400 text-sm flex items-center justify-center">
-            <svg class="w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path>
-            </svg>
-            Autenticación disponible
-          </p>
-          {% else %}
-          <p class="text-yellow-400 text-sm flex items-center justify-center">
-            <svg class="w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"></path>
-            </svg>
-            Descarga básica (puede haber limitaciones)
-          </p>
-          {% endif %}
-        </div>
-      </div>
     </div>
   </div>
 </body>
