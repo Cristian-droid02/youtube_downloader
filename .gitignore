@@ -1,8 +1,10 @@
 __pycache__/
-downloads/
 *.pyc
 *.pyo
 .env
 *.mp4
 *.mp3
 *.webm
+*.m4a
+downloads/
+tmp/
